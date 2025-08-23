@@ -10,6 +10,8 @@ using LoopVectorization
 using StatsBase
 using LinearAlgebra
 using Random
+using ForwardDiff
+using FiniteDiff
 
 include("../library/bt_american.jl")
 include("../library/ewCov.jl")
@@ -360,3 +362,92 @@ stock_returns = CSV.read("data/test11_2_stock_returns.csv",DataFrame) |> Matrix
 beta = CSV.read("data/test11_2_beta.csv",DataFrame)[!,2:end] |> Matrix
 Attribution, weights, factorWeights = expost_factor(stWgt,stock_returns,factor_returns,beta)
 CSV.write("data/testout11_2.csv",Attribution)
+
+#12.1 European Options GBSM with Greeks
+options = filter(r->!ismissing(r.ID),CSV.read("data/test12_1.csv",DataFrame))
+outVals = [gbsm(o["Option Type"] == "Call",o.Underlying,o.Strike,o.DaysToMaturity/o.DayPerYear,o.RiskFreeRate,o.RiskFreeRate - o.DividendRate, o.ImpliedVol; includeGreeks=true) for o in eachrow(options)]
+
+values = [v.value for v in outVals]
+deltas = [v.delta for v in outVals]
+gammas = [v.gamma for v in outVals]
+vegas = [v.vega for v in outVals]
+rhos = [v.rho for v in outVals]
+thetas = [v.theta for v in outVals]
+
+CSV.write("data/testout12_1.csv",DataFrame(:ID=>options.ID,:Value=>values,:Delta=>deltas,:Gamma=>gammas,:Vega=>vegas,:Rho=>rhos,:Theta=>thetas))
+
+#12.2 American Options with continous dividends including Greeks
+options = filter(r->!ismissing(r.ID),CSV.read("data/test12_1.csv",DataFrame))
+
+outVals = [bt_american(o["Option Type"] == "Call",o.Underlying,o.Strike,o.DaysToMaturity/o.DayPerYear,o.RiskFreeRate,o.RiskFreeRate - o.DividendRate, o.ImpliedVol,500) for o in eachrow(options)]
+
+function fcall(_parms)
+    parms = collect(_parms)
+    bt_american(true,parms[1],parms[2],parms[3],parms[4],parms[5],parms[6],500)
+end
+function fput(_parms)
+    parms = collect(_parms)
+    bt_american(false,parms[1],parms[2],parms[3],parms[4],parms[5],parms[6],500)
+end
+
+deltas = Float64[]
+gammas = Float64[]
+vegas = Float64[]
+rhos = Float64[]
+thetas = Float64[]
+
+for o in eachrow(options)
+    parms = [o.Underlying,o.Strike,o.DaysToMaturity/o.DayPerYear,o.RiskFreeRate,o.RiskFreeRate - o.DividendRate, o.ImpliedVol]
+    if o["Option Type"] == "Call"
+        v = fcall(parms)
+        grad = FiniteDiff.finite_difference_gradient(fcall,parms)
+        push!(deltas,grad[1])
+        d = 1.5
+        parms[1] += d
+        gamma1 = fcall(parms)
+        parms[1] -= 2d
+        gamma2 = fcall(parms)
+        gamma = (gamma1 + gamma2 - 2*v)/(d^2)
+        push!(gammas,gamma)
+        push!(vegas,grad[6])
+        push!(rhos,grad[4])
+        push!(thetas,grad[3])
+    else
+        v = fput(parms)
+        grad = FiniteDiff.finite_difference_gradient(fput,parms)
+        push!(deltas,grad[1])
+        d = 1.5
+        parms[1] += d
+        gamma1 = fput(parms)
+        parms[1] -= 2d
+        gamma2 = fput(parms)
+        gamma = (gamma1 + gamma2 - 2*v)/(d^2)
+        push!(gammas,gamma)
+        push!(vegas,grad[6])
+        push!(rhos,grad[4])
+        push!(thetas,grad[3])
+        
+    end
+end 
+
+CSV.write("data/testout12_2.csv",DataFrame(:ID=>options.ID,:Value=>outVals,:Delta=>deltas,:Gamma=>gammas,:Vega=>vegas,:Rho=>rhos,:Theta=>thetas))
+
+#12.3 American Options with Discrete Dividends including Greeks
+options = filter(r->!ismissing(r.ID),CSV.read("data/test12_3.csv",DataFrame))
+options.DividendDates = [parse.(Int,v) for v in split.(options.DividendDates,",")]
+options.DividendAmts = [parse.(Float64,v) for v in split.(options.DividendAmts,",")]
+
+options.N = options.DaysToMaturity * 2
+options.DividendDates = options.DividendDates * 2
+
+outVals = [bt_american(o["Option Type"] == "Call",
+                o.Underlying,
+                o.Strike,
+                o.DaysToMaturity/o.DayPerYear,
+                o.RiskFreeRate,
+                o.DividendAmts,
+                o.DividendDates,
+                o.ImpliedVol,
+                o.N) for o in eachrow(options)]
+
+CSV.write("data/testout12_3.csv",DataFrame(:ID=>options.ID,:Value=>outVals))
